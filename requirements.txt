@@ -1,0 +1,6 @@
+requests
+websockets
+pystray
+Pillow
+zeroconf
+pyinstaller
