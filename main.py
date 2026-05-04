@@ -169,40 +169,49 @@ class ProPresenterClient:
         """Check ProPresenter is reachable via TCP (avoids JSON parsing issues)."""
         return _check_port(self.host, self.port, timeout=1.0)
 
-    def get_slide_index(self) -> Optional[dict]:
-        """Fast poll: returns {uuid, name, slide_index} from presentation_index endpoint."""
-        data = self._get("/presentation/slide_index")
-        if not data:
+    def get_active_presentation(self) -> Optional[dict]:
+        """
+        Returns {uuid, name, slide_index, slides} for whatever is currently active.
+
+        Uses /presentation/active as the source of truth for identity and slide texts.
+        Also calls /presentation/slide_index (undocumented but working) for the current
+        slide number — falls back to 0 for Bible verses where that endpoint returns null.
+        """
+        # Get current slide index if available (null for Bible/no-id presentations)
+        slide_index = 0
+        idx_data = self._get("/presentation/slide_index")
+        if idx_data:
+            info = idx_data.get("presentation_index") or {}
+            slide_index = info.get("index", 0)
+
+        # Full active presentation — works for both regular and Bible
+        active_data = self._get("/presentation/active")
+        if not active_data:
             return None
-        info = data.get("presentation_index") or {}
-        pres_id = info.get("presentation_id") or {}
+
+        pres = active_data.get("presentation") or {}
+        groups = pres.get("groups", [])
+
+        slides: list[str] = []
+        for group in groups:
+            for slide in group.get("slides", []):
+                slides.append(slide.get("text", ""))
+
+        if not slides:
+            return None
+
+        # Regular presentations have id.uuid; Bible verses have id=null → use groups[0].uuid
+        pres_id = pres.get("id") or {}
         uuid = pres_id.get("uuid", "")
+        name = pres_id.get("name", "")
+        if not uuid and groups:
+            uuid = groups[0].get("uuid", "")
+            name = groups[0].get("name", "")  # e.g. "Genesis 2:1-25"
+
         if not uuid:
             return None
-        return {
-            "uuid": uuid,
-            "name": pres_id.get("name", ""),
-            "slide_index": info.get("index", 0),
-        }
 
-    def get_slides(self) -> list[str]:
-        """Fetch all slide texts for the currently active presentation."""
-        data = self._get("/presentation/active")
-        if not data:
-            return []
-        pres = data.get("presentation") or {}
-        texts = []
-        for group in pres.get("groups", []):
-            for slide in group.get("slides", []):
-                texts.append(slide.get("text", ""))
-        return texts
-
-    def get_active_presentation(self) -> Optional[dict]:
-        """Combines slide_index poll + active slide text lookup."""
-        info = self.get_slide_index()
-        if not info:
-            return None
-        return info
+        return {"uuid": uuid, "name": name, "slide_index": slide_index, "slides": slides}
 
     def get_libraries(self) -> list:
         # Response: [{"id": {"uuid": "...", "name": "...", "index": N}}]
@@ -443,20 +452,19 @@ async def _run_bridge(cfg: dict):
                 state.notify()
                 logger.info(f"Connected to backend: {ws_url}")
 
-                cached_slides: list[str] = []
                 active = pp_client.get_active_presentation()
-                if active and active["uuid"]:
+                if active:
                     last_uuid = active["uuid"]
                     last_slide = active["slide_index"]
-                    cached_slides = pp_client.get_slides()
-                    slide_text = cached_slides[last_slide] if last_slide < len(cached_slides) else ""
+                    slides = active["slides"]
+                    slide_text = slides[last_slide] if last_slide < len(slides) else ""
                     state.now_playing = active["name"] or "Unknown"
                     state.notify()
                     await ws.send(json.dumps({
                         "type": "presentation_changed",
                         "name": active["name"],
                         "uuid": active["uuid"],
-                        "slide_index": active["slide_index"],
+                        "slide_index": last_slide,
                         "slide_text": slide_text,
                     }))
 
@@ -481,11 +489,11 @@ async def _run_bridge(cfg: dict):
                     state.pp_connected = True
                     active = pp_client.get_active_presentation()
                     if active:
+                        slides = active["slides"]
                         if active["uuid"] != last_uuid:
                             last_uuid = active["uuid"]
                             last_slide = active["slide_index"]
-                            cached_slides = pp_client.get_slides()
-                            slide_text = cached_slides[last_slide] if last_slide < len(cached_slides) else ""
+                            slide_text = slides[last_slide] if last_slide < len(slides) else ""
                             state.now_playing = active["name"] or "Unknown"
                             state.notify()
                             logger.info(f"Presentation: '{active['name']}' slide={last_slide} text={slide_text!r}")
@@ -493,17 +501,17 @@ async def _run_bridge(cfg: dict):
                                 "type": "presentation_changed",
                                 "name": active["name"],
                                 "uuid": active["uuid"],
-                                "slide_index": active["slide_index"],
+                                "slide_index": last_slide,
                                 "slide_text": slide_text,
                             }))
                         elif active["slide_index"] != last_slide:
                             last_slide = active["slide_index"]
-                            slide_text = cached_slides[last_slide] if last_slide < len(cached_slides) else ""
+                            slide_text = slides[last_slide] if last_slide < len(slides) else ""
                             logger.info(f"Slide changed: {last_slide} text={slide_text!r}")
                             await ws.send(json.dumps({
                                 "type": "slide_changed",
                                 "uuid": active["uuid"],
-                                "index": active["slide_index"],
+                                "index": last_slide,
                                 "slide_text": slide_text,
                             }))
 
