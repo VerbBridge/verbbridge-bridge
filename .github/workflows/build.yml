@@ -20,7 +20,7 @@ jobs:
         run: pip install requests websockets certifi pystray Pillow zeroconf pyinstaller
 
       - name: Inject version
-        run: python -c "import re, sys; t=open('main.py').read(); open('main.py','w').write(re.sub(r'VERSION = \"dev\"', 'VERSION = \"${{ github.ref_name }}\"', t))"
+        run: python inject_version.py ${{ github.ref_name }}
 
       - name: Build exe
         run: >
