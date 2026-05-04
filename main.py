@@ -169,20 +169,40 @@ class ProPresenterClient:
         """Check ProPresenter is reachable via TCP (avoids JSON parsing issues)."""
         return _check_port(self.host, self.port, timeout=1.0)
 
-    def get_active_presentation(self) -> Optional[dict]:
-        # /presentation/slide_index returns both the active presentation and
-        # the current slide index in one call.
-        # Response: {"slide_index": {"index": N, "presentation_id": {"uuid", "name", "index"}}}
+    def get_slide_index(self) -> Optional[dict]:
+        """Fast poll: returns {uuid, name, slide_index} from presentation_index endpoint."""
         data = self._get("/presentation/slide_index")
         if not data:
             return None
-        slide_info = data.get("presentation_index") or {}
-        pres = slide_info.get("presentation_id") or {}
+        info = data.get("presentation_index") or {}
+        pres_id = info.get("presentation_id") or {}
+        uuid = pres_id.get("uuid", "")
+        if not uuid:
+            return None
         return {
-            "name": pres.get("name", ""),
-            "uuid": pres.get("uuid", ""),
-            "slide_index": slide_info.get("index", 0),
+            "uuid": uuid,
+            "name": pres_id.get("name", ""),
+            "slide_index": info.get("index", 0),
         }
+
+    def get_slides(self) -> list[str]:
+        """Fetch all slide texts for the currently active presentation."""
+        data = self._get("/presentation/active")
+        if not data:
+            return []
+        pres = data.get("presentation") or {}
+        texts = []
+        for group in pres.get("groups", []):
+            for slide in group.get("slides", []):
+                texts.append(slide.get("text", ""))
+        return texts
+
+    def get_active_presentation(self) -> Optional[dict]:
+        """Combines slide_index poll + active slide text lookup."""
+        info = self.get_slide_index()
+        if not info:
+            return None
+        return info
 
     def get_libraries(self) -> list:
         # Response: [{"id": {"uuid": "...", "name": "...", "index": N}}]
@@ -423,22 +443,22 @@ async def _run_bridge(cfg: dict):
                 state.notify()
                 logger.info(f"Connected to backend: {ws_url}")
 
+                cached_slides: list[str] = []
                 active = pp_client.get_active_presentation()
                 if active and active["uuid"]:
                     last_uuid = active["uuid"]
                     last_slide = active["slide_index"]
+                    cached_slides = pp_client.get_slides()
+                    slide_text = cached_slides[last_slide] if last_slide < len(cached_slides) else ""
                     state.now_playing = active["name"] or "Unknown"
                     state.notify()
-                    await ws.send(
-                        json.dumps(
-                            {
-                                "type": "presentation_changed",
-                                "name": active["name"],
-                                "uuid": active["uuid"],
-                                "slide_index": active["slide_index"],
-                            }
-                        )
-                    )
+                    await ws.send(json.dumps({
+                        "type": "presentation_changed",
+                        "name": active["name"],
+                        "uuid": active["uuid"],
+                        "slide_index": active["slide_index"],
+                        "slide_text": slide_text,
+                    }))
 
                 while not state.stop_event.is_set():
                     try:
@@ -464,30 +484,28 @@ async def _run_bridge(cfg: dict):
                         if active["uuid"] != last_uuid:
                             last_uuid = active["uuid"]
                             last_slide = active["slide_index"]
+                            cached_slides = pp_client.get_slides()
+                            slide_text = cached_slides[last_slide] if last_slide < len(cached_slides) else ""
                             state.now_playing = active["name"] or "Unknown"
                             state.notify()
-                            logger.info(f"Presentation: '{active['name']}'")
-                            await ws.send(
-                                json.dumps(
-                                    {
-                                        "type": "presentation_changed",
-                                        "name": active["name"],
-                                        "uuid": active["uuid"],
-                                        "slide_index": active["slide_index"],
-                                    }
-                                )
-                            )
+                            logger.info(f"Presentation: '{active['name']}' slide={last_slide} text={slide_text!r}")
+                            await ws.send(json.dumps({
+                                "type": "presentation_changed",
+                                "name": active["name"],
+                                "uuid": active["uuid"],
+                                "slide_index": active["slide_index"],
+                                "slide_text": slide_text,
+                            }))
                         elif active["slide_index"] != last_slide:
                             last_slide = active["slide_index"]
-                            await ws.send(
-                                json.dumps(
-                                    {
-                                        "type": "slide_changed",
-                                        "uuid": active["uuid"],
-                                        "index": active["slide_index"],
-                                    }
-                                )
-                            )
+                            slide_text = cached_slides[last_slide] if last_slide < len(cached_slides) else ""
+                            logger.info(f"Slide changed: {last_slide} text={slide_text!r}")
+                            await ws.send(json.dumps({
+                                "type": "slide_changed",
+                                "uuid": active["uuid"],
+                                "index": active["slide_index"],
+                                "slide_text": slide_text,
+                            }))
 
         except (OSError, websockets.exceptions.WebSocketException) as e:
             logger.warning(f"Backend connection error: {e}")
