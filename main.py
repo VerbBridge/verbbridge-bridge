@@ -174,10 +174,11 @@ class ProPresenterClient:
         # the current slide index in one call.
         # Response: {"slide_index": {"index": N, "presentation_id": {"uuid", "name", "index"}}}
         data = self._get("/presentation/slide_index")
+        logger.info(f"PP slide_index raw: {data}")
         if not data:
             return None
-        slide_info = data.get("slide_index", {})
-        pres = slide_info.get("presentation_id", {})
+        slide_info = data.get("slide_index") or {}
+        pres = slide_info.get("presentation_id") or {}
         return {
             "name": pres.get("name", ""),
             "uuid": pres.get("uuid", ""),
