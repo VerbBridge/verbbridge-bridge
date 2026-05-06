@@ -236,8 +236,9 @@ class ProPresenterClient:
         return [{"name": p.get("name", ""), "uuid": p.get("uuid", "")} for p in items]
 
     def get_presentation(self, uuid: str) -> Optional[dict]:
-        # Response mirrors /presentation/active: {"presentation": {"groups": [{"slides": [...]}]}}
-        data = self._get(f"/presentation/{uuid}")
+        # ProPresenter only serves slide content for the currently active presentation.
+        # Use /presentation/active — the user should navigate to the song in PP first.
+        data = self._get("/presentation/active")
         if not data:
             return None
         pres = data.get("presentation", data) if isinstance(data, dict) else {}
